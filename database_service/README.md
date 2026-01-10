@@ -24,3 +24,14 @@ Dzięki temu zarówno komponent honeypota, jak i analityka operują na wspólnym
   - przygotowanie schematu i tabel,
   - założenie indeksów niezbędnych do analizy.
 - Integracja aplikacyjna: Dostęp aplikacji do bazy poprzez typowe biblioteki klienckie PostgreSQL, z wykorzystaniem parametryzowanych zapytań.
+
+### Bezpieczeństwo
+
+Najważniejsze założenia bezpieczeństwa w `database_service`:
+
+- rozdzielenie kont admina (`POSTGRES_USER`) i konta aplikacyjnego (`honeypot_user`),  
+- minimalne uprawnienia dla aplikacji (brak DDL, brak DELETE),  
+- brak twardo zakodowanych poświadczeń w kodzie aplikacji – aplikacje korzystają z `DB_USER` i `DB_PASSWORD` przekazywanych przez zmienne środowiskowe.
+
+W połączeniu z parametryzowanymi zapytaniami w warstwie aplikacji (`psycopg2` + placeholdery `%s`) zapewnia to rozsądną podstawę do obrony przed SQL injection i nadużyciami po stronie bazy.
+
