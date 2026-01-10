@@ -34,3 +34,8 @@ Dashboard odczytuje dane z tej samej bazy PostgreSQL co honeypot_service, agregu
 - Uruchomienie lokalne: `python app.py` (port 5000).
 - Produkcyjne: Docker + Gunicorn, zmienne środowiskowe dla konfiguracji DB.
 - Skalowalność: Read-only user DB, cache minimalizuje zapytania.
+
+## Aspekty bezpieczeństwa
+
+- Serwis dostepny tylko z dozwolonych adresów IP na dedykowanym porcie
+- Serwis nie korzysta z urzytkownika root bazy danych
