@@ -56,6 +56,31 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# KONFIGURACJA BAZY DANYCH
+# ============================================================================
+
+"""
+PARAMETRY POŁĄCZENIA Z BAZĄ - pobierane z ENV
+=============================================
+Zastosowanie zmiennych środowiskowych:
+- Brak zahardkodowanych danych logowania w kodzie
+- Łatwiejsza zmiana konfiguracji między środowiskami
+- Bezpieczne wstrzykiwanie sekretów przez Docker Compose
+
+Zmienne środowiskowe:
+- DB_HOST: host serwera PostgreSQL (domyślnie 'db' w sieci Dockera)
+- DB_USER: użytkownik bazy z ograniczonymi uprawnieniami (nie admin)
+- DB_PASSWORD: hasło przechowywane w .env (docelowo nie w repozytorium)
+- DB_NAME: nazwa bazy z tabelą attacks
+- DB_PORT: port PostgreSQL (domyślnie 5432)
+"""
+DB_HOST = os.getenv('DB_HOST', 'db')
+DB_USER = os.getenv('DB_USER', 'honeypot_user')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'SecurePass123!')
+DB_NAME = os.getenv('DB_NAME', 'honeypot_db')
+DB_PORT = os.getenv('DB_PORT', '5432')
+
+# ============================================================================
 # FUNKCJE POMOCNICZE DOTYCZĄCE BEZPIECZEŃSTWA
 # ============================================================================
 
@@ -270,3 +295,152 @@ class AttackDetector:
             r"(?i)%2f%2e%2e|%5c%2e%2e|/\.\.%2f"
         ]
         return any(re.search(pattern, str(data)) for pattern in traversal_patterns)
+
+# ============================================================================
+# ROUTES / ENDPOINTY FLASK
+# ============================================================================
+
+@app.route('/health', methods=['GET'])
+@rate_limit(max_per_minute=100)
+def health_check():
+    """
+    HEALTH_CHECK - prosty endpoint do monitorowania usługi
+    ======================================================
+    Zwraca prostą informację o stanie aplikacji:
+    GET /health → {"status": "healthy"} z kodem HTTP 200.
+    """
+    return jsonify({'status': 'healthy'}), 200
+
+
+@app.route('/', methods=['GET', 'POST'])
+@rate_limit(max_per_minute=60)
+def index():
+    """
+    MAIN ENDPOINT - główny endpoint honeypota z ulepszoną logiką
+    ============================================================
+    Przebieg (ulepszony):
+    1. Pobiera IP klienta (zweryfikowane)
+    2. Pobiera User-Agent (oczyszczony)
+    3. Zbiera dane z query stringa, body, headers, path
+    4. PRIORYTETOWE sprawdzanie: SQL > XSS > Path Traversal
+    5. Zapisuje zdarzenie do pliku (JSON)
+    6. Jeśli wykryto atak – loguje do bazy (parametryzowane zapytanie)
+    7. Zwraca "Admin Panel" (nie ujawnia logiki)
+    """
+    client_ip = get_client_ip()
+    user_agent = sanitize_string(request.headers.get('User-Agent', 'unknown'), 500)
+
+    attack_type = None
+
+    # Zbieranie WSZYSTKICH danych do analizy (query, body, headers, path)
+    all_data_sources = [
+        request.query_string.decode('utf-8', errors='ignore'),
+        request.get_data(as_text=True),
+        request.path,
+        request.headers.get('Referer', ''),
+        request.headers.get('Cookie', '')
+    ]
+    
+    all_data = ' '.join([sanitize_string(data, 500) for data in all_data_sources])
+
+    # PRIORYTETOWE sprawdzanie ataków (SQL > XSS > Path)
+    if AttackDetector.detect_sql_injection(all_data):
+        attack_type = 'SQL_Injection'
+    elif AttackDetector.detect_xss_attempt(all_data):
+        attack_type = 'XSS_Attack'
+    elif AttackDetector.detect_path_traversal(all_data):
+        attack_type = 'Path_Traversal'
+
+    # Logowanie do pliku (format JSON ogranicza ryzyko wstrzyknięć do logów)
+    try:
+        os.makedirs('/var/log/honeypot', exist_ok=True)
+        with open('/var/log/honeypot/honeypot.log', 'a') as f:
+            log_entry = {
+                'timestamp': datetime.utcnow().isoformat(),
+                'event': 'HTTP_REQUEST',
+                'source_ip': client_ip,
+                'user_agent': user_agent,
+                'attack_type': attack_type,
+                'data_sample': all_data[:200] + '...' if len(all_data) > 200 else all_data
+            }
+            f.write(json.dumps(log_entry) + '\n')
+    except Exception as e:
+        logger.error(f"Błąd zapisu do pliku logu: {e}")
+
+    # Logowanie do bazy danych tylko, jeśli wykryto atak
+    if attack_type:
+        safe_log_attack(
+            attack_name=attack_type,
+            source_ip=client_ip,
+            user_agent=user_agent,
+            db_host=DB_HOST,
+            db_user=DB_USER,
+            db_password=DB_PASSWORD,
+            db_name=DB_NAME,
+            db_port=DB_PORT
+        )
+        logger.warning(f"Wykryto atak: {attack_type} z IP {client_ip}")
+
+    return "Admin Panel", 200
+
+
+@app.route('/admin', methods=['GET', 'POST'])
+@rate_limit(max_per_minute=30)
+def admin_panel():
+    """
+    ADMIN PANEL - fałszywy panel administracyjny
+    ============================================
+    Cel:
+    Udaje panel admina, by przyciągnąć pentesterów i skanery.
+    Każda próba wejścia jest rejestrowana jako nieautoryzowany dostęp.
+    """
+    client_ip = get_client_ip()
+    user_agent = sanitize_string(request.headers.get('User-Agent', 'unknown'), 500)
+
+    safe_log_attack('Unauthorized_Admin_Access', client_ip, user_agent,
+                    DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT)
+
+    return jsonify({'error': 'Access Denied'}), 403
+
+
+@app.route('/api/users', methods=['GET'])
+@rate_limit(max_per_minute=40)
+def get_users():
+    """
+    API USERS - fałszywy endpoint REST
+    ==================================
+    Cel:
+    Symuluje endpoint API z listą użytkowników.
+    Służy do wykrywania prób enumeracji/rekonesansu API.
+    """
+    client_ip = get_client_ip()
+    user_agent = sanitize_string(request.headers.get('User-Agent', 'unknown'), 500)
+
+    safe_log_attack('API_Enumeration_Attempt', client_ip, user_agent,
+                    DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT)
+
+    return jsonify({'error': 'Unauthorized'}), 401
+
+
+@app.errorhandler(404)
+def not_found(error):
+    """
+    404 HANDLER - wykrywanie enumeracji ścieżek
+    ===========================================
+    Cel:
+    Przechwytuje każde żądanie na nieistniejące ścieżki
+    i zapisuje je jako próbę enumeracji katalogów/API.
+    """
+    client_ip = get_client_ip()
+    user_agent = sanitize_string(request.headers.get('User-Agent', 'unknown'), 500)
+
+    safe_log_attack('Path_Enumeration', client_ip, user_agent,
+                    DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT)
+
+    return jsonify({'error': 'Not Found'}), 404
+
+
+
+    logger.info("Uruchamianie usługi honeypot na porcie 80...")
+
+
