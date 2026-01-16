@@ -1,41 +1,119 @@
-# Architektura Analytics Service – Honeypot Dashboard
+# Analytics Service – Honeypot Dashboard
 
-Serwis analityczny dostarcza prosty dashboard WWW do wizualizacji statystyk ataków z honeypota HTTP, korzystając z danych przechowywanych w bazie PostgreSQL.
+Serwis analityczny wyświetlający statystyki z honeypota HTTP w formie prostego dashboardu WWW, zasilanego danymi z bazy PostgreSQL (tabela `attacks`).
 
-## Użyte Technologie
+---
 
-- **Język programowania**: Python 3.x – lekki i elastyczny do budowania serwisów webowych i przetwarzania danych.
-- **Framework webowy**: Flask – minimalny framework do tworzenia API i stron HTML z routingiem.
-- **Klient bazy**: psycopg2 – adapter Pythona do połączeń z PostgreSQL via zmienne środowiskowe (DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT).
-- **Serwer WSGI**: Gunicorn – do produkcyjnego uruchamiania Flask w kontenerach Docker.
-- **Konteneryzacja**: Docker – do pakowania serwisu z zależnościami (requirements.txt: Flask==3.0.0, psycopg2-binary==2.9.9, Werkzeug==3.0.1, gunicorn==22.0.0).
+## 1. Cel i architektura
 
-## Komponenty Architektury
+Analytics Service jest lekką aplikacją Flask, która:
 
-Analytics Service składa się z trzech głównych endpointów obsługujących dashboard, API i health-check:
+- Łączy się z tą samą bazą PostgreSQL, z której korzysta `honeypot_service`.  
+- Cyklowo agreguje statystyki ataków (w tle, w osobnym wątku).  
+- Udostępnia:
+  - ciemny dashboard HTML pod `/`,  
+  - API JSON pod `/api/stats`,  
+  - prosty health‑check pod `/health`.  
 
-| Endpoint     | Opis                                      |
-|--------------|-------------------------------------------|
-| `/`          | Dashboard HTML (ciemny motyw, auto-odświeżanie JS). |
-| `/api/stats` | Dane JSON ze statystykami ataków.         |
-| `/health`    | Sprawdzenie stanu serwisu.                |
+Dzięki cache’owaniu danych w pamięci dashboard można odświeżać w przeglądarce co 10 sekund bez nadmiernego obciążania bazy.
 
-Dashboard odczytuje dane z tej samej bazy PostgreSQL co honeypot_service, agregując statystyki bez bezpośredniego obciążania bazy dzięki cache w pamięci RAM.
+Struktura katalogu:
 
-## Logika Przepływu Danych
+- `app.py` – aplikacja Flask, logika cache, agregacja statystyk i szablon HTML.  
+- `Dockerfile` – kontener z serwisem analitycznym.  
+- `requirements.txt` – zależności Pythona.  
 
-1. Serwis łączy się z PostgreSQL i cyklicznie (wątek tła) pobiera/agreguje statystyki ataków: liczba całkowita, top typy ataków, IP źródłowe, user-agenty, ostatnie zdarzenia.
-2. Dane cache'owane w pamięci (słownik z timestampem) – odświeżanie co 30s, serwowanie co 10s z cache bez zapytań do bazy.
-3. Frontend JS pobiera JSON z `/api/stats`, renderuje karty i tabele na dashboardzie.
-4. Logi zapisywane na stdout i do pliku dla monitoringu.
+---
 
-## Deployment i Skalowalność
+## 2. Dane wejściowe – tabela `attacks`
 
-- Uruchomienie lokalne: `python app.py` (port 5000).
-- Produkcyjne: Docker + Gunicorn, zmienne środowiskowe dla konfiguracji DB.
-- Skalowalność: Read-only user DB, cache minimalizuje zapytania.
+Serwis zakłada istnienie tabeli `attacks` w bazie (tworzonej przez `sql_utils.py` z honeypot_service). Struktura:
 
-## Aspekty bezpieczeństwa
+TABLE attacks
 
-- Serwis dostepny tylko z dozwolonych adresów IP na dedykowanym porcie
-- Serwis nie korzysta z urzytkownika root bazy danych
+id SERIAL PRIMARY KEY
+
+attack_name VARCHAR(100) NOT NULL
+
+source_ip VARCHAR(45) NOT NULL
+
+user_agent VARCHAR(1024)
+
+timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+
+Na tej tabeli wykonywane są zapytania agregujące (COUNT, GROUP BY, ORDER BY, LIMIT), zgodne z typowym podejściem do analizy logów ataków.
+
+---
+
+## 3. Funkcje i agregacje
+
+### 3.1. Łączenie z bazą
+
+Funkcja `get_db_connection()` używa `psycopg2` oraz zmiennych środowiskowych `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `DB_PORT` do nawiązania połączenia z PostgreSQL.
+
+### 3.2. Statystyki ataków
+
+Funkcja `get_attack_stats()` wykonuje pięć głównych zapytań:
+
+1. **Łączna liczba ataków** – `SELECT COUNT(*) FROM attacks`.  
+2. **Ataki wg typu** (TOP 10) – `GROUP BY attack_name ORDER BY count DESC`.  
+3. **Najczęstsze IP** (TOP 20) – `GROUP BY source_ip ORDER BY count DESC`.  
+4. **Najczęstsze user‑agenty** (TOP 15) – `GROUP BY user_agent ORDER BY count DESC WHERE user_agent IS NOT NULL`.  
+5. **Ostatnie ataki** (50 ostatnich rekordów) – sortowanie po `timestamp DESC`.  
+
+Wynik zwracany jest jako słownik, który następnie jest cache’owany i serwowany jako JSON do dashboardu.
+
+### 3.3. Cache w pamięci
+
+Obiekt `dashboard_cache` przechowuje:
+
+- `data` – ostatnio obliczone statystyki,  
+- `last_update` – znacznik czasu aktualizacji.  
+
+Wątek tła (`update_cache`) odświeża te dane co 30 sekund. Przeglądarka wywołuje `/api/stats` co 10 sekund, ale w większości przypadków dane są zwracane prosto z cache, co znacząco zmniejsza liczbę realnych zapytań do bazy.
+
+---
+
+## 4. Endpointy HTTP
+
+| Endpoint      | Metody | Opis                                                                 |
+|--------------|--------|----------------------------------------------------------------------|
+| `/`          | GET    | Główny dashboard HTML (ciemny motyw, auto‑odświeżanie JS).           |
+| `/api/stats` | GET    | API zwracające dane w formacie JSON dla dashboardu.                  |
+| `/health`    | GET    | Proste sprawdzenie zdrowia serwisu (status 200, `{"status":"healthy"}`). |
+
+Dashboard używa wbudowanego szablonu HTML/CSS (bez zewnętrznych bibliotek) i prostego skryptu JS do cyklicznego pobierania danych z `/api/stats` i odświeżania widoku tabel oraz kart.
+
+---
+
+## 5. Konfiguracja i uruchomienie
+
+### 5.1. Zmienne środowiskowe
+
+Serwis korzysta z tych samych zmiennych co honeypot:
+
+- `DB_HOST` – host PostgreSQL (np. `db`).  
+- `DB_USER` – użytkownik bazy (najlepiej z ograniczonymi uprawnieniami tylko do odczytu).  
+- `DB_PASSWORD` – hasło do bazy.  
+- `DB_NAME` – nazwa bazy (np. `honeypot_db`).  
+- `DB_PORT` – port PostgreSQL (domyślnie `5432`).  
+
+Stosowanie zmiennych środowiskowych ułatwia współpracę z Dockerem i narzędziami orkiestracji.
+
+### 5.2. Uruchomienie
+
+Wejdź na `http://localhost:5000/` aby zobaczyć dashboard (lub inny port, jeśli zmieniony w konfiguracji Flask/Docker).
+
+W środowisku kontenerowym typowy scenariusz to jeden serwis `honeypot_service` zapisujący do bazy i drugi `analytics_service`, który z tej samej bazy czyta dane do wizualizacji.
+
+---
+
+## 6. Logowanie i monitoring
+
+- Logi aplikacji zapisywane są do pliku `/var/log/analytics/analytics.log` oraz na stdout (widoczne w logach Dockera).  
+- Endpoint `/health` ułatwia integrację z systemem monitoringu / orkiestratorem (np. Kubernetes liveness/readiness probe).
+
+---
