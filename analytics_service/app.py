@@ -207,3 +207,277 @@ def update_cache():
 # Uruchomienie wątku aktualizującego cache w tle
 cache_thread = Thread(target=update_cache, daemon=True)
 cache_thread.start()
+
+# ============================================================================
+# SZABLON HTML - ciemny dashboard z auto‑odświeżaniem
+# ============================================================================
+
+HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Honeypot Analytics Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        h1 {
+            margin-bottom: 30px;
+            color: #38bdf8;
+        }
+        h2 {
+            margin-top: 30px;
+            margin-bottom: 20px;
+            font-size: 1.3em;
+            border-bottom: 2px solid #38bdf8;
+            padding-bottom: 10px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        .card {
+            background: #1e293b;
+            border: 1px solid #334155;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        .card-title {
+            font-size: 0.9em;
+            color: #94a3b8;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        .card-value {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #38bdf8;
+        }
+        .stat-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #334155;
+        }
+        .stat-item:last-child {
+            border-bottom: none;
+        }
+        .stat-label {
+            flex: 1;
+            word-break: break-word;
+            margin-right: 10px;
+        }
+        .stat-count {
+            font-weight: bold;
+            color: #38bdf8;
+            white-space: nowrap;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #334155;
+        }
+        th {
+            background: #1e293b;
+            font-weight: 600;
+            color: #38bdf8;
+        }
+        tr:hover {
+            background: #1e293b;
+        }
+        .update-time {
+            color: #94a3b8;
+            font-size: 0.9em;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🍯 Honeypot Analytics Dashboard</h1>
+        
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">Total Attacks</div>
+                <div class="card-value" id="total-attacks">-</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Unique Attack Types</div>
+                <div class="card-value" id="unique-types">-</div>
+            </div>
+            <div class="card">
+                <div class="card-title">Unique IPs</div>
+                <div class="card-value" id="unique-ips">-</div>
+            </div>
+        </div>
+        
+        <h2>Attack Types</h2>
+        <div class="card">
+            <div id="attacks-by-type"></div>
+        </div>
+        
+        <h2>Top Source IPs</h2>
+        <div class="card">
+            <div id="top-ips"></div>
+        </div>
+        
+        <h2>Top User Agents</h2>
+        <div class="card">
+            <div id="top-agents"></div>
+        </div>
+        
+        <h2>Recent Attacks</h2>
+        <div class="card">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Attack Type</th>
+                        <th>Source IP</th>
+                        <th>User Agent</th>
+                    </tr>
+                </thead>
+                <tbody id="recent-attacks">
+                    <tr><td colspan="4">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="update-time">
+            Last updated: <span id="last-update">-</span>
+        </div>
+    </div>
+    
+    <script>
+        function formatDate(dateStr) {
+            return new Date(dateStr).toLocaleString();
+        }
+        
+        function updateDashboard() {
+            fetch('/api/stats')
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error(data.error);
+                        return;
+                    }
+                    
+                    document.getElementById('total-attacks').textContent = data.total_attacks;
+                    document.getElementById('unique-types').textContent = data.attacks_by_type.length;
+                    document.getElementById('unique-ips').textContent = data.top_ips.length;
+                    
+                    let html = '';
+                    data.attacks_by_type.forEach(item => {
+                        html += `<div class="stat-item"><div class="stat-label">${item.name}</div><div class="stat-count">${item.count}</div></div>`;
+                    });
+                    document.getElementById('attacks-by-type').innerHTML = html;
+                    
+                    html = '';
+                    data.top_ips.forEach(item => {
+                        html += `<div class="stat-item"><div class="stat-label">${item.ip}</div><div class="stat-count">${item.count}</div></div>`;
+                    });
+                    document.getElementById('top-ips').innerHTML = html;
+                    
+                    html = '';
+                    data.top_agents.forEach(item => {
+                        let agent = item.agent.substring(0, 60) + (item.agent.length > 60 ? '...' : '');
+                        html += `<div class="stat-item"><div class="stat-label" title="${item.agent}">${agent}</div><div class="stat-count">${item.count}</div></div>`;
+                    });
+                    document.getElementById('top-agents').innerHTML = html;
+                    
+                    html = '';
+                    data.recent_attacks.forEach(item => {
+                        html += `<tr><td>${formatDate(item.timestamp)}</td><td>${item.attack_name}</td><td>${item.source_ip}</td><td>${item.user_agent ? item.user_agent.substring(0, 40) + '...' : 'N/A'}</td></tr>`;
+                    });
+                    if (html === '') html = '<tr><td colspan="4">No attacks recorded</td></tr>';
+                    document.getElementById('recent-attacks').innerHTML = html;
+                    
+                    document.getElementById('last-update').textContent = formatDate(data.last_update);
+                })
+                .catch(err => console.error('Error fetching stats:', err));
+        }
+        
+        updateDashboard();
+        setInterval(updateDashboard, 10000);
+    </script>
+</body>
+</html>
+"""
+
+# ============================================================================
+# ROUTES
+# ============================================================================
+
+@app.route('/')
+def dashboard():
+    """
+    DASHBOARD ROUTE - główny widok panelu analitycznego
+
+    Endpoint:
+      GET /
+
+    Zwraca:
+      Wyrenderowany szablon HTML dashboardu.
+    """
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route('/api/stats')
+def get_stats():
+    """
+    STATISTICS API - endpoint REST zwracający statystyki ataków
+
+    Endpoint:
+      GET /api/stats
+
+    Zwraca:
+      JSON z zagregowanymi statystykami, najczęściej z cache.
+    """
+    try:
+        if dashboard_cache['data']:
+            return jsonify(dashboard_cache['data'])
+        else:
+            data = get_attack_stats()
+            if data:
+                dashboard_cache['data'] = data
+                dashboard_cache['last_update'] = datetime.utcnow().isoformat()
+                return jsonify(data)
+            else:
+                return jsonify({'error': 'Unable to fetch stats', 'total_attacks': 0}), 500
+    except Exception as e:
+        logger.error(f"Błąd w /api/stats: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/health')
+def health():
+    """
+    HEALTH CHECK ENDPOINT
+
+    Endpoint:
+      GET /health
+
+    Zwraca:
+      {"status": "healthy"} z kodem 200 – do monitoringu kontenera.
+    """
+    return jsonify({'status': 'healthy'}), 200
+
+
+os.makedirs('/var/log/analytics', exist_ok=True)
+logger.info("Starting analytics service...")
