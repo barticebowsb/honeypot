@@ -145,38 +145,39 @@ def get_client_ip():
 # Globalny (współdzielony między routami/workerami w procesie)
 rate_limits = defaultdict(list)
 
+from multiprocessing import Manager
+manager = Manager()
+rate_limits = manager.dict()  # Udostępniony między workerami Gunicorn!
+
 def rate_limit(max_per_minute=60):
-    """
-    Naprawiony rate limit: współdzielony, z TTL, bez Redis.
-    Działa z Gunicorn - każdy worker widzi te same limity.
-    """
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             client_ip = get_client_ip()
             now = time.time()
             
-            # Auto-czyszczenie: usuń wpisy >2min
-            rate_limits[client_ip] = [
-                entry for entry in rate_limits[client_ip] 
-                if entry[0] > now - 120
-            ]
+            # Inicjalizuj listę jeśli brak
+            if client_ip not in rate_limits:
+                rate_limits[client_ip] = []
             
-            # Licznik w bieżącej minucie
-            current_minute = now // 60
-            minute_count = sum(1 for ts, _ in rate_limits[client_ip] 
-                             if ts // 60 == current_minute)
+            ip_list = rate_limits[client_ip]
+            # Czyszczenie starych (>2min)
+            ip_list[:] = [entry for entry in ip_list if entry[0] > now - 120]
+            
+            current_minute = int(now // 60)
+            minute_count = sum(1 for ts, _ in ip_list if int(ts // 60) == current_minute)
             
             if minute_count >= max_per_minute:
-                logger.warning(f"Rate limit przekroczony: {client_ip} ({minute_count}/{max_per_minute})")
+                logger.warning(f"RATE LIMIT: {client_ip} ({minute_count}/{max_per_minute})")
                 return jsonify({'error': 'Too many requests'}), 429
             
-            # Zapisz żądanie
-            rate_limits[client_ip].append((now, 1))
+            ip_list.append((now, 1))
+            rate_limits[client_ip] = ip_list  # Zapisz z powrotem
             
             return f(*args, **kwargs)
         return decorated_function
     return decorator
+
 
 
 # ============================================================================
