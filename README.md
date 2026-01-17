@@ -2,7 +2,7 @@
 
 **Pelny system honeypot** z detekcja atakow, logowaniem PostgreSQL, i panel analityczny.
 
-![Analytics Dashboard](./analytics.jpg)
+![Analytics Dashboard](./analytics.png)
 ---
 
 ## 🏗️ Przeglad Architektury
