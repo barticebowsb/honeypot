@@ -21,7 +21,7 @@ from functools import wraps
 import re
 from sql_utils import safe_log_attack
 from collections import defaultdict
-from time import time
+import time
 
 # ============================================================================
 # KONFIGURACJA APLIKACJI FLASK
@@ -142,36 +142,37 @@ def get_client_ip():
     return "unknown"
 
 
-# Globalny magazyn liczników (dzielony między wszystkie endpointy)
-rate_limit_store = defaultdict(list)
+# Globalny (współdzielony między routami/workerami w procesie)
+rate_limits = defaultdict(list)
 
-def rate_limit(max_per_minute=60, window_minutes=1):
-    """POPRAWNY RATE LIMIT - globalny store + sliding window"""
+def rate_limit(max_per_minute=60):
+    """
+    Naprawiony rate limit: współdzielony, z TTL, bez Redis.
+    Działa z Gunicorn - każdy worker widzi te same limity.
+    """
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             client_ip = get_client_ip()
-            now = time()
+            now = time.time()
             
-            # Czyszczenie starych wpisów (starsze niż window_minutes)
-            rate_limit_store[client_ip] = [
-                ts for ts in rate_limit_store[client_ip] 
-                if now - ts < window_minutes * 60
+            # Auto-czyszczenie: usuń wpisy >2min
+            rate_limits[client_ip] = [
+                entry for entry in rate_limits[client_ip] 
+                if entry[0] > now - 120
             ]
             
-            # SPRAWDZENIE LIMITU
-            current_count = len(rate_limit_store[client_ip])
-            if current_count >= max_per_minute:
-                logger.warning(f"RATE LIMIT: IP {client_ip} ({current_count}/{max_per_minute})")
-                return jsonify({
-                    'error': 'Rate limit exceeded', 
-                    'requests': current_count,
-                    'limit': max_per_minute
-                }), 429
+            # Licznik w bieżącej minucie
+            current_minute = now // 60
+            minute_count = sum(1 for ts, _ in rate_limits[client_ip] 
+                             if ts // 60 == current_minute)
             
-            # DODANIE bieżącego żądania
-            rate_limit_store[client_ip].append(now)
-            logger.debug(f"Rate limit OK: IP {client_ip} ({current_count + 1}/{max_per_minute})")
+            if minute_count >= max_per_minute:
+                logger.warning(f"Rate limit przekroczony: {client_ip} ({minute_count}/{max_per_minute})")
+                return jsonify({'error': 'Too many requests'}), 429
+            
+            # Zapisz żądanie
+            rate_limits[client_ip].append((now, 1))
             
             return f(*args, **kwargs)
         return decorated_function
