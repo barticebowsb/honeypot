@@ -25,7 +25,7 @@
 | 2 | OR 1=1 | `regex[1]` | `curl -s \"http://localhost/?login=admin'+OR+'1'='1'\"` |
 | 3 | SLEEP() | `regex[7]` | `curl -s \"http://localhost/?id=1;+SLEEP\\(5\\)--\"` |
 
-### 🕷️ Ataki XSS (2/3 ✅)
+### 🕷️ Ataki XSS (3/3 ✅)
 
 | # | Payload | Regex | Komenda |
 |---|---------|-------|---------|
@@ -33,7 +33,7 @@
 | 2 | `<svg onload>` | `regex[9]` | `curl -s \"http://localhost/?input=%3Csvg%20onload=alert(1)%3E\"` |
 | 3 | `%3Cscript` | `regex[4]` | `curl -s \"http://localhost/?data=%3Cscript%3Ealert(1)%3C/script%3E\"` |
 
-### 📁 Path Traversal (5/5 ✅)
+### 📁 Path Traversal (3/3 ✅)
 
 | # | Payload | Regex | Komenda |
 |---|---------|-------|---------|
