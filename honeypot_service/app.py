@@ -20,6 +20,8 @@ from flask import Flask, request, jsonify
 from functools import wraps
 import re
 from sql_utils import safe_log_attack
+from collections import defaultdict
+from time import time
 
 # ============================================================================
 # KONFIGURACJA APLIKACJI FLASK
@@ -140,48 +142,33 @@ def get_client_ip():
     return "unknown"
 
 
-def rate_limit(max_per_minute=60):
+# Globalny magazyn liczników (dzielony między wszystkie endpointy)
+rate_limit_store = defaultdict(list)
+
+def rate_limit(max_per_minute=60, window_minutes=1):
     """
-    RATE_LIMIT - dekorator ograniczający liczbę żądań z jednego IP
-    ==============================================================
-    Cel:
-    Ograniczenie liczby żądań na minutę z jednego adresu IP, aby
-    utrudnić brute force, skanowanie i proste DoS.
-
-    Działanie:
-    1. Dekorator opakowuje funkcję widoku Flask
-    2. Pobiera IP klienta (get_client_ip)
-    3. Tworzy klucz "IP:YYYY-MM-DD HH:MM" (koszyk na minutę)
-    4. Zwiększa licznik żądań dla danego klucza
-    5. Jeśli licznik przekracza max_per_minute – zwraca HTTP 429
-    6. Po minucie powstaje nowy koszyk z nowym kluczem
-
-    Ograniczenia:
-    - Przechowuje liczniki tylko w pamięci (restart kontenera je zeruje)
-    - Przy wielu replikach aplikacji warto przenieść liczniki do Redis/Memcached
+    POPRAWIONY RATE LIMIT - używa globalnego store + sliding window
     """
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             client_ip = get_client_ip()
-
-            # Inicjalizacja słownika liczników przy pierwszym użyciu
-            if not hasattr(decorated_function, 'calls'):
-                decorated_function.calls = {}
-
-            # Klucz unikalny dla IP i aktualnej minuty
-            now = datetime.now()
-            key = f"{client_ip}:{now.strftime('%Y-%m-%d %H:%M')}"
-
-            # Zwiększ licznik dla danego IP/minuty
-            decorated_function.calls[key] = decorated_function.calls.get(key, 0) + 1
-
+            now = time()
+            
+            # Czyszczenie starych wpisów (sliding window)
+            rate_limit_store[client_ip] = [
+                timestamp for timestamp in rate_limit_store[client_ip]
+                if now - timestamp < window_minutes * 60
+            ]
+            
             # Sprawdzenie limitu
-            if decorated_function.calls[key] > max_per_minute:
-                logger.warning(f"Przekroczony limit żądań dla IP {client_ip}")
-                return jsonify({'error': 'Rate limit exceeded'}), 429
-
-            # Kontynuuj normalną obsługę żądania
+            if len(rate_limit_store[client_ip]) >= max_per_minute:
+                logger.warning(f"Rate limit exceeded dla IP {client_ip} ({len(rate_limit_store[client_ip])}/{max_per_minute})")
+                return jsonify({'error': 'Rate limit exceeded. Too many requests.'}), 429
+            
+            # Dodaj bieżący timestamp
+            rate_limit_store[client_ip].append(now)
+            
             return f(*args, **kwargs)
         return decorated_function
     return decorator
