@@ -142,10 +142,6 @@ def get_client_ip():
     return "unknown"
 
 
-from multiprocessing import Manager
-manager = Manager()
-rate_limits = manager.dict()
-
 def rate_limit(max_per_minute=60):
     def decorator(f):
         @wraps(f)
@@ -153,32 +149,37 @@ def rate_limit(max_per_minute=60):
             client_ip = get_client_ip()
             now = time.time()
             
-            # Inicjalizuj jeśli brak
-            if client_ip not in rate_limits:
-                rate_limits[client_ip] = []
+            # LAZY INIT - działa z każdym Gunicorn
+            if not hasattr(decorated_function, 'rate_data'):
+                decorated_function.rate_data = defaultdict(list)
             
-            ip_list = rate_limits[client_ip]
+            rate_data = decorated_function.rate_data
             
-            # Czyszczenie (nowa lista, bo manager.dict() immutable)
+            if client_ip not in rate_
+                rate_data[client_ip] = []
+            
+            ip_list = rate_data[client_ip]
+            
+            # Czyszczenie starych wpisów (>2 min)
             cleaned = [e for e in ip_list if e[0] > now - 120]
-            rate_limits[client_ip] = cleaned
+            rate_data[client_ip] = cleaned
             
-            current_minute = int(now / 60)
-            minute_count = sum(1 for ts, _ in cleaned if int(ts / 60) == current_minute)
+            minute_start = int(now / 60)
+            count = sum(1 for ts, _ in cleaned if int(ts / 60) == minute_start)
             
-            if minute_count >= max_per_minute:
-                logger.warning(f"RATE LIMIT {client_ip}: {minute_count}/{max_per_minute}")
+            # DEBUG TEMP - usuń po teście
+            logger.info(f"RATE {client_ip}: {count}/{max_per_minute}")
+            
+            if count >= max_per_minute:
+                logger.warning(f"RATE BLOCK {client_ip}: {count}/{max_per_minute}")
                 return jsonify({'error': 'Too many requests'}), 429
             
-            # Dodaj nowe
             cleaned.append((now, 1))
-            rate_limits[client_ip] = cleaned
+            rate_data[client_ip] = cleaned
             
             return f(*args, **kwargs)
         return decorated_function
     return decorator
-
-
 
 # ============================================================================
 # SILNIK WYKRYWANIA ATAKÓW - POPRAWIONY Z NIEZAWODNYMI REGEXAMI
