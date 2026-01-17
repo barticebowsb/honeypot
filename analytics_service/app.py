@@ -9,12 +9,15 @@ from functools import wraps
 from threading import Thread
 import time
 
+# Tworzymy instancję aplikacji Flask
 app = Flask(__name__)
 
 # ============================================================================
 # KONFIGURACJA BAZY DANYCH
 # ============================================================================
 
+# Dane konfiguracyjne bazy pobierane z zmiennych środowiskowych
+# (z sensownymi wartościami domyślnymi na potrzeby środowiska developerskiego)
 DB_HOST = os.getenv('DB_HOST', 'db')
 DB_USER = os.getenv('DB_USER', 'honeypot_user')
 DB_PASSWORD = os.getenv('DB_PASSWORD', 'SecurePass123!')
@@ -25,6 +28,10 @@ DB_PORT = os.getenv('DB_PORT', '5432')
 # KONFIGURACJA LOGOWANIA
 # ============================================================================
 
+# Konfiguracja globalnego loggera:
+# - poziom INFO
+# - logowanie do pliku w /var/log/analytics/analytics.log
+# - oraz na standardowe wyjście (np. logi kontenera)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -48,6 +55,9 @@ DLACZEGO CACHE?
 
 EFEKT: istotne zmniejszenie obciążenia bazy (znacznie mniej zapytań).
 """
+# Prosta struktura słownikowa przechowująca:
+# - last_update: znacznik czasu ostatniego odświeżenia
+# -  ostatnio policzone statystyki
 dashboard_cache = {
     'last_update': None,
     'data': {}
@@ -66,16 +76,18 @@ def get_db_connection():
     - None w przypadku błędu (aplikacja degraduje się łagodnie)
     """
     try:
+        # Inicjalizacja połączenia z bazą przy użyciu danych konfiguracyjnych
         conn = psycopg2.connect(
             host=DB_HOST,
             user=DB_USER,
             password=DB_PASSWORD,
             database=DB_NAME,
             port=DB_PORT,
-            connect_timeout=5
+            connect_timeout=5  # maksymalny czas oczekiwania na połączenie
         )
         return conn
     except Exception as e:
+        # Logowanie błędu połączenia (bez przerywania działania serwera HTTP)
         logger.error(f"Błąd połączenia z bazą: {e}")
         return None
 
@@ -96,8 +108,10 @@ def get_attack_stats():
     Słownik z kompletem statystyk lub None przy błędzie.
     """
     try:
+        # Nawiązanie połączenia z bazą
         conn = get_db_connection()
         if not conn:
+            # Jeżeli nie udało się połączyć, zwracamy None
             return None
 
         cursor = conn.cursor()
@@ -107,6 +121,7 @@ def get_attack_stats():
         total_attacks = cursor.fetchone()[0]
 
         # 2. Ataki wg typu (TOP 10)
+        # Grupowanie po nazwie ataku i sortowanie malejąco po liczbie wystąpień
         cursor.execute("""
             SELECT attack_name, COUNT(*) as count
             FROM attacks
@@ -114,6 +129,7 @@ def get_attack_stats():
             ORDER BY count DESC
             LIMIT 10
         """)
+        # Przekształcenie wyników w listę słowników przyjazną dla JSON
         attacks_by_type = [
             {'name': row[0], 'count': row[1]}
             for row in cursor.fetchall()
@@ -147,6 +163,7 @@ def get_attack_stats():
         ]
 
         # 5. Ostatnie ataki (50 najnowszych)
+        # Sortowanie po timestamp malejąco, aby mieć najnowsze rekordy
         cursor.execute("""
             SELECT id, attack_name, source_ip, user_agent, timestamp
             FROM attacks
@@ -159,14 +176,17 @@ def get_attack_stats():
                 'attack_name': row[1],
                 'source_ip': row[2],
                 'user_agent': row[3],
+                # Konwersja timestampa na string, aby był serializowalny do JSON
                 'timestamp': str(row[4])
             }
             for row in cursor.fetchall()
         ]
 
+        # Zamykamy kursor i połączenie, aby nie trzymać zasobów bazy
         cursor.close()
         conn.close()
 
+        # Zwracamy komplet danych dla dashboardu
         return {
             'total_attacks': total_attacks,
             'attacks_by_type': attacks_by_type,
@@ -177,6 +197,7 @@ def get_attack_stats():
         }
 
     except Exception as e:
+        # Logowanie błędu związanego z zapytaniami / agregacją
         logger.error(f"Błąd pobierania statystyk ataków: {e}")
         return None
 
@@ -191,20 +212,27 @@ def update_cache():
     - Baza dostaje tylko jedno zapytanie agregujące co 30 s,
       zamiast wielu zapytań z każdej przeglądarki
     """
+    # Pętla nieskończona – wątek działa przez cały czas życia aplikacji
     while True:
         try:
+            # Pobranie najnowszych statystyk z bazy
             data = get_attack_stats()
-            if data:
+            if 
+                # Aktualizacja pamięciowego cache
                 dashboard_cache['data'] = data
                 dashboard_cache['last_update'] = datetime.utcnow().isoformat()
                 logger.info("Zaktualizowano cache dashboardu")
         except Exception as e:
+            # W razie błędu logujemy i próbujemy ponownie po 30 sekundach
             logger.error(f"Błąd podczas aktualizacji cache: {e}")
 
+        # Odczekanie 30 sekund przed kolejną aktualizacją
         time.sleep(30)
 
 
 # Uruchomienie wątku aktualizującego cache w tle
+# daemon=True oznacza, że wątek zakończy się automatycznie
+# po zatrzymaniu głównego procesu (nie blokuje wyłączenia aplikacji)
 cache_thread = Thread(target=update_cache, daemon=True)
 cache_thread.start()
 
@@ -212,6 +240,11 @@ cache_thread.start()
 # SZABLON HTML - ciemny dashboard z auto‑odświeżaniem
 # ============================================================================
 
+# HTML_TEMPLATE zawiera cały front-end dashboardu:
+# - proste CSS (ciemny motyw)
+# - sekcje kart ze statystykami
+# - tabelę z ostatnimi atakami
+# - JS, który co 10 sekund odpytuje /api/stats i aktualizuje widok
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -365,10 +398,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
     
     <script>
+        // Pomocnicza funkcja formatująca datę w czytelnej formie
         function formatDate(dateStr) {
             return new Date(dateStr).toLocaleString();
         }
         
+        // Funkcja pobierająca dane z backendu i aktualizująca dashboard
         function updateDashboard() {
             fetch('/api/stats')
                 .then(r => r.json())
@@ -378,22 +413,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         return;
                     }
                     
+                    // Ustawienie wartości w kafelkach
                     document.getElementById('total-attacks').textContent = data.total_attacks;
                     document.getElementById('unique-types').textContent = data.attacks_by_type.length;
                     document.getElementById('unique-ips').textContent = data.top_ips.length;
                     
+                    // Lista typów ataków
                     let html = '';
                     data.attacks_by_type.forEach(item => {
                         html += `<div class="stat-item"><div class="stat-label">${item.name}</div><div class="stat-count">${item.count}</div></div>`;
                     });
                     document.getElementById('attacks-by-type').innerHTML = html;
                     
+                    // Najczęstsze IP
                     html = '';
                     data.top_ips.forEach(item => {
                         html += `<div class="stat-item"><div class="stat-label">${item.ip}</div><div class="stat-count">${item.count}</div></div>`;
                     });
                     document.getElementById('top-ips').innerHTML = html;
                     
+                    // Najczęstsze user-agenty (obcięte do 60 znaków, pełny w tooltipie)
                     html = '';
                     data.top_agents.forEach(item => {
                         let agent = item.agent.substring(0, 60) + (item.agent.length > 60 ? '...' : '');
@@ -401,6 +440,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     });
                     document.getElementById('top-agents').innerHTML = html;
                     
+                    // Ostatnie ataki (tabela)
                     html = '';
                     data.recent_attacks.forEach(item => {
                         html += `<tr><td>${formatDate(item.timestamp)}</td><td>${item.attack_name}</td><td>${item.source_ip}</td><td>${item.user_agent ? item.user_agent.substring(0, 40) + '...' : 'N/A'}</td></tr>`;
@@ -408,12 +448,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     if (html === '') html = '<tr><td colspan="4">No attacks recorded</td></tr>';
                     document.getElementById('recent-attacks').innerHTML = html;
                     
+                    // Ustawienie informacji o czasie ostatniej aktualizacji
                     document.getElementById('last-update').textContent = formatDate(data.last_update);
                 })
                 .catch(err => console.error('Error fetching stats:', err));
         }
         
+        // Pierwsze wywołanie po załadowaniu strony
         updateDashboard();
+        // Odświeżanie co 10 sekund
         setInterval(updateDashboard, 10000);
     </script>
 </body>
@@ -435,6 +478,7 @@ def dashboard():
     Zwraca:
       Wyrenderowany szablon HTML dashboardu.
     """
+    # render_template_string renderuje szablon przekazany jako string (HTML_TEMPLATE)
     return render_template_string(HTML_TEMPLATE)
 
 
@@ -450,17 +494,22 @@ def get_stats():
       JSON z zagregowanymi statystykami, najczęściej z cache.
     """
     try:
+        # Jeżeli cache ma dane, zwracamy je bez odpytywania bazy
         if dashboard_cache['data']:
             return jsonify(dashboard_cache['data'])
         else:
+            # Fallback: bezpośrednie pobranie statystyk z bazy
             data = get_attack_stats()
-            if data:
+            if 
+                # Zapisanie do cache na przyszłość
                 dashboard_cache['data'] = data
                 dashboard_cache['last_update'] = datetime.utcnow().isoformat()
                 return jsonify(data)
             else:
+                # W przypadku braku danych zwracamy błąd 500 z informacją
                 return jsonify({'error': 'Unable to fetch stats', 'total_attacks': 0}), 500
     except Exception as e:
+        # Obsługa nieprzewidzianych wyjątków
         logger.error(f"Błąd w /api/stats: {e}")
         return jsonify({'error': str(e)}), 500
 
@@ -476,8 +525,11 @@ def health():
     Zwraca:
       {"status": "healthy"} z kodem 200 – do monitoringu kontenera.
     """
+    # Prosta odpowiedź JSON informująca, że serwis działa
     return jsonify({'status': 'healthy'}), 200
 
 
+# Upewniamy się, że katalog na logi istnieje (jeśli nie, zostanie utworzony)
 os.makedirs('/var/log/analytics', exist_ok=True)
+# Informacja startowa w logach po uruchomieniu serwisu
 logger.info("Starting analytics service...")
