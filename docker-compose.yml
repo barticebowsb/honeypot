@@ -1,1 +1,130 @@
-init placeholder
+version: '3.9'   # Wersja składni Docker Compose – 3.9 obsługuje nowsze funkcje compose
+
+services:        # Definicje wszystkich usług/kontenerów w tym stacku
+
+  db:            # Usługa bazy danych PostgreSQL
+    build:       # Budowanie obrazu z Dockerfile zamiast używania gotowego z Docker Hub
+      context: ./database_service   # Katalog, z którego budowany jest obraz (Dockerfile + init-db.sh)
+      dockerfile: Dockerfile        # Nazwa pliku Dockerfile w powyższym katalogu
+    container_name: honeypot_db     # Stała nazwa kontenera (ułatwia debug i logi)
+    environment:                    # Zmienne środowiskowe przekazywane do kontenera Postgresa
+      POSTGRES_USER: postgres       # Konto administracyjne bazy (superuser)
+      POSTGRES_PASSWORD: AdminPass123!  # Hasło do konta administracyjnego
+      POSTGRES_DB: honeypot_db      # Nazwa domyślnej bazy tworzonej przy inicjalizacji
+      POSTGRES_INITDB_ARGS: "-c shared_buffers=256MB -c max_connections=200"
+        # Dodatkowe parametry konfiguracji serwera ustawiane przy inicjalizacji:
+        # - shared_buffers=256MB: ilość pamięci RAM przeznaczona na cache stron
+        # - max_connections=200: maksymalna liczba jednoczesnych połączeń z bazą
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+        # Wolumen na dane Postgresa – trwałe przechowywanie (nie ginie przy restarcie kontenera)
+      - ./database_service/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
+        # Podpięcie skryptu inicjalizacyjnego:
+        # Postgres automatycznie wykona wszystkie skrypty w tym katalogu przy pierwszym starcie
+    networks:
+      - honeypot_network            # Sieć Docker, w której działa baza i pozostałe serwisy
+    ports:
+      - "5432:5432"                 # Wystawienie portu bazy na hosta (host:kontener = 5432:5432)
+    healthcheck:                    # Sprawdzanie stanu zdrowia kontenera bazy
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+        # Polecenie sprawdzające, czy serwer PostgreSQL akceptuje połączenia
+      interval: 10s                 # Co ile sekund wykonywać healthcheck
+      timeout: 5s                   # Maksymalny czas oczekiwania na wynik polecenia
+      retries: 5                    # Ile nieudanych prób uzna usługę za „unhealthy”
+    security_opt:
+      - no-new-privileges:true      # Zabrania procesom w kontenerze podnoszenia uprawnień (hardening)
+    cap_drop:
+      - ALL                         # Usunięcie wszystkich dodatkowych capabilities jądra (minimalne uprawnienia)
+    cap_add:
+      - NET_BIND_SERVICE            # Zezwolenie na bindowanie portów <1024, jeśli potrzeba
+      - CHOWN                       # Możliwość zmiany właściciela plików (przy pracy z danymi)
+      - SETUID                      # Zezwolenie na zmianę UID procesu (używane przez Postgresa)
+      - SETGID                      # Zezwolenie na zmianę GID procesu
+      - DAC_OVERRIDE                # Dostęp do plików mimo standardowych ograniczeń DAC (wymagane przez Postgresa)
+    restart: unless-stopped         # Automatyczne ponowne uruchamianie, dopóki użytkownik nie zatrzyma usługi
+    logging:
+      driver: "json-file"           # Domyślny driver logowania – pliki JSON na hoście
+      options:
+        max-size: "100m"            # Maksymalny rozmiar pojedynczego pliku logu
+        max-file: "10"              # Maksymalna liczba rotowanych plików logów
+
+  honeypot:                         # Usługa głównego serwisu honeypot (Flask)
+    build:
+      context: ./honeypot_service   # Katalog z kodem honeypota i Dockerfile
+      dockerfile: Dockerfile
+    container_name: honeypot_app    # Stała nazwa kontenera z aplikacją honeypot
+    environment:                    # Zmienne środowiskowe przekazywane do aplikacji Flask
+      DB_HOST: db                   # Host bazy danych – nazwa usługi `db` w tej samej sieci
+      DB_USER: honeypot_user        # Użytkownik bazy z ograniczonymi uprawnieniami (tworzony w init-db.sh)
+      DB_PASSWORD: SecurePass123!   # Hasło użytkownika aplikacyjnego
+      DB_NAME: honeypot_db          # Nazwa bazy, do której łączy się aplikacja
+      DB_PORT: "5432"               # Port bazy wewnątrz sieci Dockera
+      FLASK_ENV: production         # Tryb pracy Flask – produkcyjny (wyłączony debugger itp.)
+    depends_on:
+      db:
+        condition: service_healthy  # Honeypot startuje dopiero, gdy healthcheck bazy zwróci „healthy”
+    networks:
+      - honeypot_network            # Ta sama sieć co baza – możliwość komunikacji po nazwie `db`
+    ports:
+      - "80:80"                     # Wystawienie aplikacji honeypot na porcie 80 hosta
+    security_opt:
+      - no-new-privileges:true      # Zablokowanie możliwości podnoszenia uprawnień w kontenerze
+    cap_drop:
+      - ALL                         # Usunięcie wszystkich dodatkowych capabilities – minimalizacja powierzchni ataku
+      - NET_RAW                     # Dodatkowo odebranie możliwości tworzenia surowych socketów (ochrona sieciowa)
+    cap_add:
+      - NET_BIND_SERVICE            # Jedyna capability – możliwość bindowania portów <1024 (np. 80)
+    read_only: true                 # System plików kontenera w trybie tylko do odczytu (poza tmpfs/wolumenami)
+    tmpfs:
+      - /tmp                        # Tymczasowy system plików w RAM dla katalogu /tmp (zapisy tylko w pamięci)
+      - /var/log/honeypot:mode=1777 # Tymczasowy system plików w RAM na logi honeypota. mode=1777 – „publiczny” katalog tymczasowy (sticky bit, jak /tmp)
+    restart: unless-stopped         # Automat restartuje kontener, o ile nie został ręcznie zatrzymany
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"            # Rotacja logów – max 100 MB na plik
+        max-file: "10"              # Przechowywane maksymalnie 10 plików logów
+
+  analytics:                        # Usługa panelu analitycznego (dashboard Flask)
+    build:
+      context: ./analytics_service  # Katalog z kodem dashboardu i Dockerfile
+      dockerfile: Dockerfile
+    container_name: honeypot_analytics   # Stała nazwa kontenera z panelem
+    environment:
+      DB_HOST: db                   # Adres bazy – usługa `db` w tej samej sieci
+      DB_USER: honeypot_user        # Ten sam użytkownik aplikacyjny co w honeypot
+      DB_PASSWORD: SecurePass123!   # To samo hasło – musi być spójne z init-db.sh
+      DB_NAME: honeypot_db          # Nazwa bazy
+      DB_PORT: "5432"               # Port PostgreSQL w sieci Dockera
+      FLASK_ENV: production         # Tryb produkcyjny Flask
+    depends_on:
+      db:
+        condition: service_healthy  # Uruchom, dopiero gdy baza jest zdrowa (pg_isready OK)
+    networks:
+      - honeypot_network            # Wspólna sieć z honeypot i bazą
+    ports:
+      - "5000:5000"                 # Wystawienie dashboardu na porcie 5000 hosta
+    security_opt:
+      - no-new-privileges:true      # Blokada eskalacji uprawnień w kontenerze
+    cap_drop:
+      - ALL                         # Usunięcie wszystkich dodatkowych capabilities
+    cap_add:
+      - NET_BIND_SERVICE            # Pozostawienie jedynie możliwości bindowania portu serwera HTTP
+    read_only: true                 # System plików tylko do odczytu (hardening)
+    tmpfs:
+      - /tmp                        # Tymczasowy RAM‑disk na /tmp
+      - /var/log/analytics:mode=1777 # Tymczasowy RAM‑disk na logi serwisu analitycznego
+    restart: unless-stopped         # Automatyczny restart kontenera, o ile nie został zatrzymany ręcznie
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "10"
+
+networks:
+  honeypot_network:   # Definicja wspólnej sieci dla wszystkich trzech usług
+    driver: bridge    # Standardowa sieć typu bridge (izolowana od innych projektów Compose)
+
+volumes:
+  postgres_data:      # Nazwany wolumen dla danych Postgresa
+    driver: local     # Dane przechowywane lokalnie na hoście (domyślny driver volume)
