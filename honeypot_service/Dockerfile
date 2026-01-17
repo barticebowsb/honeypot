@@ -23,5 +23,5 @@ USER honeypot
 EXPOSE 80
 
 # Start via Gunicorn (bez dev-serwera Werkzeug)
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:80", "app:app", \
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:80", "app:app", \
      "--access-logfile", "-", "--error-logfile", "-"]
