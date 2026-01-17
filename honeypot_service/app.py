@@ -142,12 +142,9 @@ def get_client_ip():
     return "unknown"
 
 
-# Globalny (współdzielony między routami/workerami w procesie)
-rate_limits = defaultdict(list)
-
 from multiprocessing import Manager
 manager = Manager()
-rate_limits = manager.dict()  # Udostępniony między workerami Gunicorn!
+rate_limits = manager.dict()
 
 def rate_limit(max_per_minute=60):
     def decorator(f):
@@ -156,23 +153,26 @@ def rate_limit(max_per_minute=60):
             client_ip = get_client_ip()
             now = time.time()
             
-            # Inicjalizuj listę jeśli brak
+            # Inicjalizuj jeśli brak
             if client_ip not in rate_limits:
                 rate_limits[client_ip] = []
             
             ip_list = rate_limits[client_ip]
-            # Czyszczenie starych (>2min)
-            ip_list[:] = [entry for entry in ip_list if entry[0] > now - 120]
             
-            current_minute = int(now // 60)
-            minute_count = sum(1 for ts, _ in ip_list if int(ts // 60) == current_minute)
+            # Czyszczenie (nowa lista, bo manager.dict() immutable)
+            cleaned = [e for e in ip_list if e[0] > now - 120]
+            rate_limits[client_ip] = cleaned
+            
+            current_minute = int(now / 60)
+            minute_count = sum(1 for ts, _ in cleaned if int(ts / 60) == current_minute)
             
             if minute_count >= max_per_minute:
-                logger.warning(f"RATE LIMIT: {client_ip} ({minute_count}/{max_per_minute})")
+                logger.warning(f"RATE LIMIT {client_ip}: {minute_count}/{max_per_minute}")
                 return jsonify({'error': 'Too many requests'}), 429
             
-            ip_list.append((now, 1))
-            rate_limits[client_ip] = ip_list  # Zapisz z powrotem
+            # Dodaj nowe
+            cleaned.append((now, 1))
+            rate_limits[client_ip] = cleaned
             
             return f(*args, **kwargs)
         return decorated_function
@@ -432,9 +432,3 @@ def not_found(error):
                     DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT)
 
     return jsonify({'error': 'Not Found'}), 404
-
-
-
-    logger.info("Uruchamianie usługi honeypot na porcie 80...")
-
-
