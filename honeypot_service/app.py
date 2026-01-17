@@ -5,7 +5,7 @@ HONEYPOT SERVICE - SILNIK WYKRYWANIA ATAKÓW
 FUNKCJE BEZPIECZEŃSTWA:
 ✓ Czyszczenie danych wejściowych ogranicza ataki typu injection
 ✓ Zapytania z parametrami blokują SQL injection w bazie danych
-✓ Rate limiting ogranicza brute force i zalewanie żądaniami
+✓ Rate limiting ogranicza brute force i zalewanie żądaniami (Flask-Limiter)
 ✓ Walidacja IP utrudnia spoofing
 ✓ Kontener działa bez uprawnień root
 ✓ System plików w kontenerze w trybie tylko do odczytu
@@ -17,11 +17,10 @@ import json
 import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
-from functools import wraps
 import re
 from sql_utils import safe_log_attack
-from collections import defaultdict
-import time
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # ============================================================================
 # KONFIGURACJA APLIKACJI FLASK
@@ -83,6 +82,48 @@ DB_NAME = os.getenv('DB_NAME', 'honeypot_db')
 DB_PORT = os.getenv('DB_PORT', '5432')
 
 # ============================================================================
+# KONFIGURACJA RATE LIMITING
+# ============================================================================
+
+"""
+FLASK-LIMITER - profesjonalny rate limiting
+===========================================
+Zastosowanie:
+- Memory storage dla prostej konfiguracji (dla produkcji użyj Redis)
+- Automatyczne czyszczenie starych wpisów
+- Thread-safe
+- Działa z wieloma workerami Gunicorn (jeśli użyjesz Redis)
+
+UWAGA: memory:// nie dzieli stanu między workerami Gunicorn.
+Dla produkcji zamień na: storage_uri="redis://localhost:6379"
+"""
+
+def get_client_ip_for_limiter():
+    """
+    Funkcja klucza dla rate limitera - używa tej samej logiki co get_client_ip()
+    """
+    if request.headers.getlist("X-Forwarded-For"):
+        ip = request.headers.getlist("X-Forwarded-For")[0]
+    else:
+        ip = request.remote_addr or "unknown"
+    
+    # Walidacja formatu IP
+    ip_pattern = r'^[\d.]+$|^[\da-f:]+$'
+    if ip and re.match(ip_pattern, ip):
+        return ip[:45]
+    return "unknown"
+
+
+limiter = Limiter(
+    key_func=get_client_ip_for_limiter,
+    app=app,
+    storage_uri="memory://",
+    storage_options={},
+    strategy="fixed-window",
+    default_limits=[]
+)
+
+# ============================================================================
 # FUNKCJE POMOCNICZE DOTYCZĄCE BEZPIECZEŃSTWA
 # ============================================================================
 
@@ -141,45 +182,6 @@ def get_client_ip():
         return sanitize_string(ip, 45)  # maksymalna długość IPv6
     return "unknown"
 
-
-def rate_limit(max_per_minute=60):
-    def decorator(f):
-        @wraps(f)
-        def decorated_function(*args, **kwargs):
-            client_ip = get_client_ip()
-            now = time.time()
-            
-            # LAZY INIT - działa z każdym Gunicorn
-            if not hasattr(decorated_function, 'rate_data'):
-                decorated_function.rate_data = defaultdict(list)
-            
-            rate_data = decorated_function.rate_data
-            
-            if client_ip not in rate_
-                rate_data[client_ip] = []
-            
-            ip_list = rate_data[client_ip]
-            
-            # Czyszczenie starych wpisów (>2 min)
-            cleaned = [e for e in ip_list if e[0] > now - 120]
-            rate_data[client_ip] = cleaned
-            
-            minute_start = int(now / 60)
-            count = sum(1 for ts, _ in cleaned if int(ts / 60) == minute_start)
-            
-            # DEBUG TEMP - usuń po teście
-            logger.info(f"RATE {client_ip}: {count}/{max_per_minute}")
-            
-            if count >= max_per_minute:
-                logger.warning(f"RATE BLOCK {client_ip}: {count}/{max_per_minute}")
-                return jsonify({'error': 'Too many requests'}), 429
-            
-            cleaned.append((now, 1))
-            rate_data[client_ip] = cleaned
-            
-            return f(*args, **kwargs)
-        return decorated_function
-    return decorator
 
 # ============================================================================
 # SILNIK WYKRYWANIA ATAKÓW - POPRAWIONY Z NIEZAWODNYMI REGEXAMI
@@ -296,7 +298,7 @@ class AttackDetector:
 # ============================================================================
 
 @app.route('/health', methods=['GET'])
-@rate_limit(max_per_minute=100)
+@limiter.limit("100/minute")
 def health_check():
     """
     HEALTH_CHECK - prosty endpoint do monitorowania usługi
@@ -308,7 +310,7 @@ def health_check():
 
 
 @app.route('/', methods=['GET', 'POST'])
-@rate_limit(max_per_minute=60)
+@limiter.limit("60/minute")
 def index():
     """
     MAIN ENDPOINT - główny endpoint honeypota z ulepszoną logiką
@@ -380,7 +382,7 @@ def index():
 
 
 @app.route('/admin', methods=['GET', 'POST'])
-@rate_limit(max_per_minute=30)
+@limiter.limit("30/minute")
 def admin_panel():
     """
     ADMIN PANEL - fałszywy panel administracyjny
@@ -399,7 +401,7 @@ def admin_panel():
 
 
 @app.route('/api/users', methods=['GET'])
-@rate_limit(max_per_minute=40)
+@limiter.limit("40/minute")
 def get_users():
     """
     API USERS - fałszywy endpoint REST
