@@ -146,32 +146,37 @@ def get_client_ip():
 rate_limit_store = defaultdict(list)
 
 def rate_limit(max_per_minute=60, window_minutes=1):
-    """
-    POPRAWIONY RATE LIMIT - używa globalnego store + sliding window
-    """
+    """POPRAWNY RATE LIMIT - globalny store + sliding window"""
     def decorator(f):
         @wraps(f)
         def decorated_function(*args, **kwargs):
             client_ip = get_client_ip()
             now = time()
             
-            # Czyszczenie starych wpisów (sliding window)
+            # Czyszczenie starych wpisów (starsze niż window_minutes)
             rate_limit_store[client_ip] = [
-                timestamp for timestamp in rate_limit_store[client_ip]
-                if now - timestamp < window_minutes * 60
+                ts for ts in rate_limit_store[client_ip] 
+                if now - ts < window_minutes * 60
             ]
             
-            # Sprawdzenie limitu
-            if len(rate_limit_store[client_ip]) >= max_per_minute:
-                logger.warning(f"Rate limit exceeded dla IP {client_ip} ({len(rate_limit_store[client_ip])}/{max_per_minute})")
-                return jsonify({'error': 'Rate limit exceeded. Too many requests.'}), 429
+            # SPRAWDZENIE LIMITU
+            current_count = len(rate_limit_store[client_ip])
+            if current_count >= max_per_minute:
+                logger.warning(f"RATE LIMIT: IP {client_ip} ({current_count}/{max_per_minute})")
+                return jsonify({
+                    'error': 'Rate limit exceeded', 
+                    'requests': current_count,
+                    'limit': max_per_minute
+                }), 429
             
-            # Dodaj bieżący timestamp
+            # DODANIE bieżącego żądania
             rate_limit_store[client_ip].append(now)
+            logger.debug(f"Rate limit OK: IP {client_ip} ({current_count + 1}/{max_per_minute})")
             
             return f(*args, **kwargs)
         return decorated_function
     return decorator
+
 
 # ============================================================================
 # SILNIK WYKRYWANIA ATAKÓW - POPRAWIONY Z NIEZAWODNYMI REGEXAMI
